@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Star Catcher — a tiny game my agent built</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b1026; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+  #wrap { position: relative; width: min(100vw, 56.25vh); aspect-ratio: 9 / 16; }
+  canvas { width: 100%; height: 100%; display: block; touch-action: none; border-radius: 12px; }
+  #hint { position: absolute; left: 0; right: 0; bottom: 10px; text-align: center;
+          color: rgba(255,255,255,.55); font-size: 12px; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="540" height="960"></canvas>
+  <div id="hint">move: mouse / touch / arrow keys &mdash; catch stars, dodge rocks</div>
+</div>
+<script>
+"use strict";
+/* Star Catcher — a tiny one-button-ish catcher game, written from scratch.
+   Day one it was one slow star and a basket. A week of daily updates later:
+   coins, comets, rocks to dodge, combos, particles, levels and lives. */
+
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+const W = 540, H = 960, GROUND = 880;
+
+const state = {
+  mode: "start",      // start | play | over
+  score: 0, lives: 3, combo: 0, bestCombo: 0, caught: 0, level: 1,
+  basketX: W / 2, basketTX: W / 2, // target x follows pointer / keys
+  keys: {}, pointerX: null,
+  items: [], parts: [], floats: [],
+  spawnT: 0, t: 0, shake: 0,
+};
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+function spawnItem() {
+  const r = Math.random();
+  let type = "star";
+  if (r < 0.18) type = "coin";
+  else if (r < 0.30) type = "comet";
+  else if (r < 0.44 && state.level >= 2) type = "rock";
+  const speed = rand(150, 210) + state.level * 26 + (type === "comet" ? 120 : 0);
+  state.items.push({
+    type, x: rand(40, W - 40), y: -30,
+    vy: speed, size: type === "rock" ? 26 : type === "comet" ? 20 : 18,
+    spin: rand(-2, 2), rot: rand(0, Math.PI * 2),
+    trail: [],
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = rand(60, 260);
+    state.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60,
+                       life: rand(0.35, 0.7), max: 0.7, color, size: rand(3, 7) });
+  }
+}
+
+function floatText(x, y, text, color) {
+  state.floats.push({ x, y, text, color, life: 0.9 });
+}
+
+function catchItem(it) {
+  if (it.type === "rock") {
+    state.lives -= 1; state.combo = 0; state.shake = 10;
+    burst(it.x, it.y, "#ff5470", 18);
+    floatText(it.x, it.y - 20, "OUCH", "#ff5470");
+    if (state.lives <= 0) { state.mode = "over"; }
+    return;
+  }
+  const pts = it.type === "star" ? 10 : it.type === "coin" ? 25 : 50;
+  state.combo += 1;
+  state.bestCombo = Math.max(state.bestCombo, state.combo);
+  const bonus = state.combo >= 3 ? Math.floor(pts * 0.1 * state.combo) : 0;
+  state.score += pts + bonus;
+  state.caught += 1;
+  const color = it.type === "star" ? "#ffd166" : it.type === "coin" ? "#ffe066" : "#7dd7ff";
+  burst(it.x, it.y, color, it.type === "comet" ? 22 : 12);
+  floatText(it.x, it.y - 20, "+" + (pts + bonus), color);
+  const newLevel = 1 + Math.floor(state.caught / 10);
+  if (newLevel > state.level) {
+    state.level = newLevel;
+    floatText(W / 2, 300, "LEVEL " + state.level + "!", "#ffffff");
+  }
+}
+
+function reset() {
+  state.score = 0; state.lives = 3; state.combo = 0; state.bestCombo = 0;
+  state.caught = 0; state.level = 1;
+  state.items = []; state.parts = []; state.floats = [];
+  state.basketX = W / 2; state.basketTX = W / 2; state.spawnT = 0; state.shake = 0;
+  state.mode = "play";
+}
+
+function starPath(x, y, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const a = rot + (i * Math.PI) / 5 - Math.PI / 2;
+    const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+function drawItem(it) {
+  ctx.save();
+  ctx.translate(it.x, it.y);
+  if (it.type === "star") {
+    ctx.rotate(it.rot);
+    ctx.fillStyle = "#ffd166";
+    starPath(0, 0, it.size, 0); ctx.fill();
+    ctx.fillStyle = "#fff3c4";
+    starPath(0, 0, it.size * 0.55, 0); ctx.fill();
+  } else if (it.type === "coin") {
+    ctx.fillStyle = "#ffb703";
+    ctx.beginPath(); ctx.arc(0, 0, it.size, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffe066";
+    ctx.beginPath(); ctx.arc(0, 0, it.size * 0.62, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#b97e0a";
+    ctx.font = "bold 20px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("$", 0, 1);
+  } else if (it.type === "comet") {
+    for (let i = it.trail.length - 1; i >= 0; i--) {
+      const p = it.trail[i];
+      ctx.globalAlpha = (i / it.trail.length) * 0.5;
+      ctx.fillStyle = "#7dd7ff";
+      ctx.beginPath(); ctx.arc(p.x - it.x, p.y - it.y, it.size * 0.5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#bfeaff";
+    ctx.beginPath(); ctx.arc(0, 0, it.size, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(-4, -4, it.size * 0.45, 0, Math.PI * 2); ctx.fill();
+  } else { // rock
+    ctx.rotate(it.rot);
+    ctx.fillStyle = "#5c5470";
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const rr = it.size * (0.8 + 0.25 * Math.sin(i * 2.7));
+      const px = Math.cos(a) * rr, py = Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#ff5470";
+    ctx.beginPath(); ctx.arc(-6, -4, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(7, 5, 3, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBackground(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#0b1026"); g.addColorStop(0.55, "#1b2a52"); g.addColorStop(1, "#3a1c5c");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // moon
+  ctx.fillStyle = "#f4f1de";
+  ctx.beginPath(); ctx.arc(452, 120, 42, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ddd6b8";
+  ctx.beginPath(); ctx.arc(438, 108, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(466, 132, 6, 0, Math.PI * 2); ctx.fill();
+  // twinkling stars
+  for (let i = 0; i < 70; i++) {
+    const sx = (i * 173) % W, sy = (i * 97) % 700;
+    const tw = 0.35 + 0.65 * Math.abs(Math.sin(t * 1.3 + i));
+    ctx.globalAlpha = tw * 0.9;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(sx, sy, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+  // ground
+  ctx.fillStyle = "#14102a"; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = "#2a2150"; ctx.fillRect(0, GROUND, W, 4);
+}
+
+function drawBasket() {
+  const x = state.basketX, y = GROUND - 28;
+  ctx.save();
+  ctx.fillStyle = "#ffd166";
+  ctx.beginPath();
+  ctx.moveTo(x - 52, y - 18); ctx.lineTo(x + 52, y - 18);
+  ctx.lineTo(x + 40, y + 22); ctx.lineTo(x - 40, y + 22);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#e0a93e";
+  ctx.fillRect(x - 52, y - 18, 104, 8);
+  ctx.fillStyle = "#fff3c4";
+  ctx.fillRect(x - 30, y - 6, 60, 4);
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(11,16,38,0.55)";
+  ctx.fillRect(0, 0, W, 64);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 30px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText("SCORE " + state.score, 18, 34);
+  ctx.textAlign = "right";
+  ctx.fillText("DAY 7", W - 18, 34);
+  // lives
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = i < state.lives ? "#ff5470" : "rgba(255,255,255,0.2)";
+    ctx.beginPath(); ctx.arc(30 + i * 34, 88, 10, 0, Math.PI * 2); ctx.fill();
+  }
+  // combo
+  if (state.combo >= 2) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#7dd7ff";
+    ctx.font = "bold 26px system-ui, sans-serif";
+    ctx.fillText("COMBO x" + state.combo, W / 2, 92);
+  }
+  // level progress
+  const prog = (state.caught % 10) / 10;
+  ctx.fillStyle = "rgba(255,255,255,0.2)";
+  ctx.fillRect(18, 116, W - 36, 8);
+  ctx.fillStyle = "#7dd7ff";
+  ctx.fillRect(18, 116, (W - 36) * prog, 8);
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = "16px system-ui, sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("LEVEL " + state.level, 18, 142);
+}
+
+function drawCenter(text, sub) {
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 54px system-ui, sans-serif";
+  ctx.fillText(text, W / 2, H / 2 - 40);
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  ctx.font = "24px system-ui, sans-serif";
+  ctx.fillText(sub, W / 2, H / 2 + 24);
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  state.t += dt;
+  ctx.save();
+  if (state.shake > 0) {
+    ctx.translate(rand(-state.shake, state.shake), rand(-state.shake, state.shake));
+    state.shake *= 0.88;
+    if (state.shake < 0.5) state.shake = 0;
+  }
+  drawBackground(state.t);
+
+  if (state.mode === "play") {
+    // basket follows pointer / keys
+    if (state.pointerX !== null) state.basketTX = state.pointerX;
+    if (state.keys["ArrowLeft"] || state.keys["a"]) state.basketTX -= 520 * dt;
+    if (state.keys["ArrowRight"] || state.keys["d"]) state.basketTX += 520 * dt;
+    state.basketTX = Math.max(56, Math.min(W - 56, state.basketTX));
+    state.basketX += (state.basketTX - state.basketX) * Math.min(1, dt * 14);
+
+    state.spawnT -= dt;
+    if (state.spawnT <= 0) {
+      spawnItem();
+      state.spawnT = Math.max(0.28, 0.9 - state.level * 0.07) * rand(0.8, 1.2);
+    }
+    for (let i = state.items.length - 1; i >= 0; i--) {
+      const it = state.items[i];
+      it.y += it.vy * dt;
+      it.rot += it.spin * dt;
+      if (it.type === "comet") {
+        it.trail.push({ x: it.x, y: it.y });
+        if (it.trail.length > 8) it.trail.shift();
+      }
+      const caught = it.y > GROUND - 52 && it.y < GROUND + 6 && Math.abs(it.x - state.basketX) < 58;
+      if (caught) { catchItem(it); state.items.splice(i, 1); continue; }
+      if (it.y > H + 40) {
+        if (it.type !== "rock") { state.combo = 0; }
+        state.items.splice(i, 1);
+      }
+    }
+    for (let i = state.parts.length - 1; i >= 0; i--) {
+      const p = state.parts[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 420 * dt; p.life -= dt;
+      if (p.life <= 0) state.parts.splice(i, 1);
+    }
+    for (let i = state.floats.length - 1; i >= 0; i--) {
+      const f = state.floats[i];
+      f.y -= 46 * dt; f.life -= dt;
+      if (f.life <= 0) state.floats.splice(i, 1);
+    }
+  }
+
+  for (const it of state.items) drawItem(it);
+  for (const p of state.parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  if (state.mode !== "start") drawBasket();
+  for (const f of state.floats) {
+    ctx.globalAlpha = Math.max(0, f.life / 0.9);
+    ctx.fillStyle = f.color;
+    ctx.font = "bold 26px system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+  if (state.mode !== "start") drawHUD();
+
+  if (state.mode === "start") {
+    ctx.fillStyle = "rgba(11,16,38,0.62)";
+    ctx.fillRect(0, 0, W, H);
+    drawCenter("STAR CATCHER", "catch the falling stars");
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold 28px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("TAP TO PLAY", W / 2, H / 2 + 110);
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.font = "20px system-ui, sans-serif";
+    ctx.fillText("built by my AI agent in a week", W / 2, H / 2 + 150);
+  } else if (state.mode === "over") {
+    ctx.fillStyle = "rgba(11,16,38,0.66)";
+    ctx.fillRect(0, 0, W, H);
+    drawCenter("GAME OVER", "score " + state.score + "  ·  best combo x" + state.bestCombo);
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold 28px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("TAP TO PLAY AGAIN", W / 2, H / 2 + 110);
+  }
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+
+function toX(e) {
+  const r = cv.getBoundingClientRect();
+  const cx = e.touches ? e.touches[0].clientX : e.clientX;
+  return ((cx - r.left) / r.width) * W;
+}
+cv.addEventListener("pointerdown", (e) => {
+  if (state.mode !== "play") { reset(); return; }
+  state.pointerX = toX(e);
+});
+cv.addEventListener("pointermove", (e) => {
+  if (state.pointerX !== null) state.pointerX = toX(e);
+});
+window.addEventListener("pointerup", () => { state.pointerX = null; });
+window.addEventListener("keydown", (e) => {
+  state.keys[e.key] = true;
+  if ((e.key === " " || e.key === "Enter") && state.mode !== "play") reset();
+  if (e.key.startsWith("Arrow")) e.preventDefault();
+});
+window.addEventListener("keyup", (e) => { state.keys[e.key] = false; });
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
